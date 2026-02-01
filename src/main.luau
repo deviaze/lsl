@@ -15,6 +15,7 @@ local parsed = args.parse("lsl", "list files/directories with recentness and siz
     args.named("--match", "optional pattern to filter by"):aliases("-m"),
     args.named("--path", "search for an explicit path instead of cwd"):aliases("-p"),
     args.named("--limit", "max number of results to display after sorting by modified"):aliases("-l"),
+    args.named("--timeout", "how long in seconds before we abort trying to recursively get size"):aliases("-t"),
     args.flag("--size", "sort by size instead of modified"):aliases("-s"),
     args.flag("--norec", "omit recursive directory size checks"):aliases("-nr"),
     args.flag("--date", "show date last modified instead of duration since last modified"):aliases("-d")
@@ -24,13 +25,21 @@ local t0 = os.clock()
 
 local pattern = parsed:get("--match") :: string?
 local chosen_path = (parsed:get("--path") :: string?) or fs.path.cwd()
-local limit_str = parsed:get("--limit") :: string?
+
 local limit: number?
+local limit_str = parsed:get("--limit") :: string?
 if limit_str then
     limit = tonumber(limit_str)
 end
+
 local sort_by_size = parsed.flags["--size"] or false
 local omit_recursive = parsed.flags["--norec"] or false
+
+local timeout: number = 2.5
+local timeout_str = parsed:get("--timeout")
+if timeout_str then
+    timeout = tonumber(timeout_str) or error(`bad timeout given (not a number): {timeout_str}`)
+end
 
 local all_entries = fs.entries(chosen_path)
 
@@ -116,6 +125,9 @@ for path, entry in all_entries do
             if entry.type == "File" then
                 size = entry:size()
             else
+                if fs.is(path) == "PermissionDenied" then
+                    continue
+                end
                 if not omit_recursive then
                     if PARALLEL then
                         push_thread(path)
@@ -137,7 +149,13 @@ for path, entry in all_entries do
     end
 end
 
+local hit_timeout = false
 while #threads > 0 do
+    if os.clock() - t0 > timeout then
+        hit_timeout = true
+        break
+    end
+
     local sleep = true
     for index, info in threads do
         local size = info.handle:read()
@@ -213,8 +231,12 @@ for index, entry in entries do
     end
 end
 
-print(`{chosen_path}: {stringify_size(total_size)}`)
+print(`{chosen_path}: {stringify_size(total_size)} {if omit_recursive or hit_timeout then colors.red("(inaccurate - partially completed)") else ""}`)
 print(table.concat(lines, "\n"))
+
+if hit_timeout then
+    print(colors.red(`hit timeout of {timeout} seconds, size may be missing or inaccurate for some directories`))
+end
 
 local dt = os.clock() - t0
 if dt > 0.25 then

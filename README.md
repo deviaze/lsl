@@ -17,9 +17,8 @@ and how big it is. Plus I don't want to remember all the options.
 
 You need the [seal runtime](https://github.com/seal-runtime/seal) to run this Luau code. Put *seal* in your `$PATH`.
 
-Copy `./lsl.luau` to somewhere in your `$PATH/lsl`. Or name it whatever you want.
-
-Make it executable with `chmod +x wherever/lsl` or your operating system's equivalent.
+Run the build script `seal .seal/build.luau`. By default, it wants to move `./lsl` to `~/.local/bin/lsl`.
+Change `target_path` in the build script if you want it somewhere else.
 
 ## Usage
 
@@ -30,7 +29,8 @@ being listed should be your `cwd` unless you override it by passing `--path | -p
 
 - `--path` or `-p` to override the directory being listed.
 - `--match` or -m` to pass a Luau string matching pattern to filter entries against.
-- `--limit` or `-l` if you only want to see the first `n` results
+- `--limit` or `-l` if you only want to see the first `n` results.
+- `--timeout` or `-t` so it doesn't take forever with huge nested directories. Defaults to 2.5 seconds.
 
 ### Flags
 
@@ -44,9 +44,4 @@ being listed should be your `cwd` unless you override it by passing `--path | -p
 
 ## Building
 
-1. Run `seal compile -o lsl.luau`
-2. Make sure it got bundled correctly/no syntax errors.
-3. Put `#!/usr/bin/env seal` on top of `lsl.luau`
-4. `cp ./lsl.luau lsl`
-5. Make it executable `chmod +x ./lsl`
-6. Move `./lsl` to your `$PATH`.
+- Run `seal .seal/build.luau`. Change `target_path` in the build script if you want to rename `lsl` or put it somewhere else.
