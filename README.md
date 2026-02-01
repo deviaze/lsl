@@ -2,6 +2,8 @@
 
 A pretty, multithreaded directory content lister sorted by date modified or file or (recursive) directory size.
 
+<img width="640" height="700" alt="lsl listing screenshot with big directory" src="https://github.com/user-attachments/assets/aad4a839-7c9f-4177-a0cb-a096af247e2f" />
+
 ## Why?
 
 Whenever I download something and want to `zcp` or move it somewhere I tend to forget what it's named.
