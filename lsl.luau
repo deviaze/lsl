@@ -1,15 +1,54 @@
-#!/usr/bin/env seal
 --!optimize 2
 --!nolint LocalShadow
-
-local PARALLEL = true
+--!nolint ImportUnused
 
 local fs = require("@std/fs")
 local args = require("@std/args")
 local colors = require("@std/io/colors")
+local json = require("@std/json")
 local str = require("@std/str")
 local thread = require("@std/thread")
 local datetime = require("@std/time/datetime")
+
+-- START /home/deviaze/Scripts/lsl/src/get_size_of_directory.luau
+
+local function get_size_of_directory(dir: string): (number, string?)
+    local ok, paths = pcall(fs.listdir, dir)
+    if not ok then
+        return 0, dir
+    end
+
+    local size = 0
+    local failed: { string } = {}
+    for _, path in paths do
+        local path_is = fs.is(path)
+        if path_is == "File" then
+            local entry = fs.file(path)
+            if entry then
+                size += entry:size()
+            end
+        elseif path_is == "Directory" then
+            local sub_size, sub_err = get_size_of_directory(path)
+            size += sub_size
+            if sub_err then
+                table.insert(failed, sub_err)
+            end
+        end
+    end
+
+    if #failed > 0 then
+        return size, table.concat(failed, "\n")
+    end
+
+    return size, nil
+end
+
+local resolved_require_directory = get_size_of_directory
+-- END /home/deviaze/Scripts/lsl/src/get_size_of_directory.luau
+local get_size_of_directory = resolved_require_directory
+
+local PARALLEL = true
+local CACHE_PATH = fs.dir.home():join(".cache", "lsl", "sizes.json")
 
 local parsed = args.parse("lsl", "list files/directories with recentness and size, sorted by date modified or size", {
     description = "Recentness is determined by date modified, and directory size is computed recursively in parallel."
@@ -24,6 +63,20 @@ local parsed = args.parse("lsl", "list files/directories with recentness and siz
 )
 
 local t0 = os.clock()
+
+type CacheEntry = {
+    size: number,
+    last_modified_time: string,
+}
+local cache: { [string]: CacheEntry } = {}
+local cache_dirty = false
+
+if fs.is(CACHE_PATH) == "File" then
+    local ok, data = pcall(json.readfile, CACHE_PATH)
+    if ok and data then
+        cache = data :: { [string]: CacheEntry }
+    end
+end
 
 local pattern = parsed:get("--match") :: string?
 local chosen_path = (parsed:get("--path") :: string?) or fs.path.cwd()
@@ -69,63 +122,85 @@ local function stringify_size(bytes: number): string
     end
 end
 
-local function get_size_of_directory(dir: string): number
-    local paths = fs.listdir(dir, true)
-    local size = 0
-    for _, path in paths do
-        local entry = fs.file(path)
-        if not entry then
-            continue -- might be weird one like a symlink or fifo
-        end
-        size += entry:size()
-    end
-    return size
-end
-
 type EntryWithMetadata = {
     type: "File" | "Directory",
     basename: string,
     path: string,
     modified: DateTime,
     ago: string,
-    size: number?
+    size: number?,
+    size_partial: boolean?,
 }
 
 local entries: { EntryWithMetadata } = {}
-local threads: { { path: string, handle: thread.ThreadHandle } } = {}
+local MAX_PARALLEL = 16
+local pending_paths: { string } = {}
+local pending_last_modified_times: { [string]: string } = {} -- mtimes for queued paths, looked up when dequeuing
+local active_threads: { { path: string, handle: thread.ThreadHandle, last_modified_time: string? } } = {}
 
-local function push_thread(path: string)
-    local handle = thread.spawn {
-        src = [====[
-if channel then
-    local fs = require("@std/fs")
+local function push_thread(path: string, last_modified_time: string?)
+    if #active_threads < MAX_PARALLEL then
+        local handle = thread.spawn {
+            src = [====[
 
-    local function get_size_of_directory(dir: string): number
-        local paths = fs.listdir(dir, true)
-        local size = 0
-        for _, path in paths do
-            local entry = fs.file(path)
-            if not entry then
-                continue -- might be weird one like a symlink or fifo
-            end
-            size += entry:size()
-        end
-        return size
+local fs = require("@std/fs")
+
+local function get_size_of_directory(dir: string): (number, string?)
+    local ok, paths = pcall(fs.listdir, dir)
+    if not ok then
+        return 0, dir
     end
 
+    local size = 0
+    local failed: { string } = {}
+    for _, path in paths do
+        local path_is = fs.is(path)
+        if path_is == "File" then
+            local entry = fs.file(path)
+            if entry then
+                size += entry:size()
+            end
+        elseif path_is == "Directory" then
+            local sub_size, sub_err = get_size_of_directory(path)
+            size += sub_size
+            if sub_err then
+                table.insert(failed, sub_err)
+            end
+        end
+    end
+
+    if #failed > 0 then
+        return size, table.concat(failed, "\n")
+    end
+
+    return size, nil
+end
+
+if channel then
     local path = channel.data.path :: string
-    local size = get_size_of_directory(path)
-    channel:send(tostring(size))
+    local size, size_err = get_size_of_directory(path)
+
+    channel:send({
+        size = size,
+        partial = size_err ~= nil,
+    })
 end
 ]====],
-        data = {
-            path = path,
+            data = {
+                path = path,
+            }
         }
-    }
-    table.insert(threads, {
-        path = path,
-        handle = handle,
-    })
+        table.insert(active_threads, {
+            path = path,
+            handle = handle,
+            last_modified_time = last_modified_time,
+        })
+    else
+        table.insert(pending_paths, path)
+        if last_modified_time then
+            pending_last_modified_times[path] = last_modified_time
+        end
+    end
 end
 
 local now = datetime.now()
@@ -133,68 +208,160 @@ local now = datetime.now()
 for path, entry in all_entries do
     local basename = fs.path.child(path)
     assert(basename ~= nil, `no basename for {path}?`)
-    local is_matching =
-        if pattern == nil then
-            true
-        elseif string.match(basename, pattern) then
-            true
-        else
-            false
-    if is_matching then
-        local modified = get_modified_at(entry)
-        local size: number? = nil do
-            if entry.type == "File" then
-                size = entry:size()
-            else
-                if fs.is(path) == "PermissionDenied" then
-                    continue
+
+    if pattern and not string.match(basename, pattern) then
+        continue
+    end
+
+    local modified = get_modified_at(entry)
+    local size: number? = nil
+    local size_partial: boolean? = nil
+
+    if entry.type == "File" then
+        size = entry:size()
+    else
+        if fs.is(path) == "PermissionDenied" then
+            continue
+        end
+        if not omit_recursive then
+            if PARALLEL then
+                local last_modified_time = tostring(entry:metadata().modified_at)
+                local cached = cache[path]
+                if cached and cached.last_modified_time == last_modified_time then
+                    size = cached.size
+                else
+                    push_thread(path, last_modified_time)
                 end
-                if not omit_recursive then
-                    if PARALLEL then
-                        push_thread(path)
-                    else
-                        size = get_size_of_directory(path)
-                    end
+            else
+                local result, result_err = get_size_of_directory(path)
+                size = result
+                if result_err then
+                    size_partial = true
                 end
             end
         end
-        local ago = modified:to(now):duration():display() .. " ago"
-        table.insert(entries, {
-            type = entry.type,
-            basename = basename,
-            modified = modified,
-            path = path,
-            ago = ago,
-            size = size,
-        })
     end
+
+    local ago = modified:to(now):duration():display() .. " ago"
+
+    table.insert(entries, {
+        type = entry.type,
+        basename = basename,
+        modified = modified,
+        path = path,
+        ago = ago,
+        size = size,
+        size_partial = size_partial,
+    })
 end
 
 local hit_timeout = false
-while #threads > 0 do
+while #active_threads > 0 or #pending_paths > 0 do
     if os.clock() - t0 > timeout then
         hit_timeout = true
         break
     end
 
     local sleep = true
-    for index, info in threads do
-        local size = info.handle:read()
-        if size then
+    for index, info in active_threads do
+        local msg = info.handle:read()
+        if msg then
+            local data = msg :: { size: number, partial: boolean }
             for _, entry in entries do
                 if entry.path == info.path then
-                    entry.size = tonumber(size)
+                    entry.size = data.size
+                    if data.partial then
+                        entry.size_partial = true
+                    end
                 end
             end
+
+            if not data.partial and info.last_modified_time then
+                cache[info.path] = {
+                    size = data.size,
+                    last_modified_time = info.last_modified_time,
+                }
+                cache_dirty = true
+            end
+
             info.handle:join()
-            table.remove(threads, index)
+
+            table.remove(active_threads, index)
+
+            if #pending_paths > 0 then
+                local next_path = table.remove(pending_paths, 1) :: string
+                local next_last_modified_time = pending_last_modified_times[next_path]
+                pending_last_modified_times[next_path] = nil
+                local handle = thread.spawn {
+                    src = [====[
+
+local fs = require("@std/fs")
+
+local function get_size_of_directory(dir: string): (number, string?)
+    local ok, paths = pcall(fs.listdir, dir)
+    if not ok then
+        return 0, dir
+    end
+
+    local size = 0
+    local failed: { string } = {}
+    for _, path in paths do
+        local path_is = fs.is(path)
+        if path_is == "File" then
+            local entry = fs.file(path)
+            if entry then
+                size += entry:size()
+            end
+        elseif path_is == "Directory" then
+            local sub_size, sub_err = get_size_of_directory(path)
+            size += sub_size
+            if sub_err then
+                table.insert(failed, sub_err)
+            end
+        end
+    end
+
+    if #failed > 0 then
+        return size, table.concat(failed, "\n")
+    end
+
+    return size, nil
+end
+
+if channel then
+    local path = channel.data.path :: string
+    local size, size_err = get_size_of_directory(path)
+
+    channel:send({
+        size = size,
+        partial = size_err ~= nil,
+    })
+end
+]====],
+                    data = {
+                        path = next_path,
+                    }
+                }
+                table.insert(active_threads, {
+                    path = next_path,
+                    handle = handle,
+                    last_modified_time = next_last_modified_time,
+                })
+            end
+
             sleep = false -- we dont want to wait before iterating again if we found smth
             break -- prevent from removing > 1 index during iteration
         end
     end
+
     if sleep then
         thread.sleep(5)
     end
+end
+
+if cache_dirty then
+    fs.dir.ensure(fs.dir.home():join(".cache", "lsl"))
+    json.writefile_raw(CACHE_PATH, cache)
 end
 
 table.sort(entries, function(a: EntryWithMetadata, b: EntryWithMetadata)
@@ -235,7 +402,15 @@ for index, entry in entries do
         ago ..= string.rep(" ", ago_needed_spaces)
     end
 
-    local stringified_size = if entry.size then stringify_size(entry.size) else ""
+    local stringified_size = ""
+    if entry.size then
+        stringified_size =
+            if entry.size_partial then
+                colors.yellow(`~{stringify_size(entry.size)}`)
+            else
+                stringify_size(entry.size)
+    end
+
     if entry.size then
         total_size += entry.size
     end
@@ -243,8 +418,10 @@ for index, entry in entries do
     table.insert(lines, `{if entry.type == "Directory" then DIR else "F"} {PIPE} {basename} {PIPE} {
         if parsed.flags["--date"] then
             entry.modified:format("MM/DD/YYYY HH:MM (AM/PM)")
-        else ago
+        else
+            ago
     } {PIPE} {stringified_size}`)
+
     if limit and index >= limit then
         break
     end

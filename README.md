@@ -2,7 +2,11 @@
 
 A pretty, multithreaded directory content lister sorted by date modified or file or (recursive) directory size.
 
+Directory sizes are computed in parallel and cached by modify time (mtime) to `~/.cache/lsl/sizes.json`, so repeated runs on the same directory are near-instant. Inaccessible subdirectories are skipped and reported as approximate (`~42.3 MB`) rather than erroring out.
+
+<!-- markdownlint-disable MD033 -->
 <img width="640" height="700" alt="lsl listing screenshot with big directory" src="https://github.com/user-attachments/assets/aad4a839-7c9f-4177-a0cb-a096af247e2f" />
+<!-- markdownlint-enable MD033 -->
 
 ## Why?
 
@@ -17,8 +21,7 @@ and how big it is. Plus I don't want to remember all the options.
 
 You need the [seal runtime](https://github.com/seal-runtime/seal) to run this Luau code. Put *seal* in your `$PATH`.
 
-Run the build script `seal .seal/build.luau`. By default, it wants to move `./lsl` to `~/.local/bin/lsl`.
-Change `target_path` in the build script if you want it somewhere else.
+Run the build script `seal .seal/build.luau`. By default it installs to `~/.local/bin/lsl`, but you can override the destination by setting the `DIRECTORY_LISTER_LSL_BIN_LOCATION` environment variable. The script will prompt before overwriting an existing binary.
 
 ## Usage
 
@@ -28,7 +31,7 @@ being listed should be your `cwd` unless you override it by passing `--path | -p
 ### Named arguments
 
 - `--path` or `-p` to override the directory being listed.
-- `--match` or -m` to pass a Luau string matching pattern to filter entries against.
+- `--match` or `-m` to pass a Luau string matching pattern to filter entries against.
 - `--limit` or `-l` if you only want to see the first `n` results.
 - `--timeout` or `-t` so it doesn't take forever with huge nested directories. Defaults to 2.5 seconds.
 
@@ -44,4 +47,4 @@ being listed should be your `cwd` unless you override it by passing `--path | -p
 
 ## Building
 
-- Run `seal .seal/build.luau`. Change `target_path` in the build script if you want to rename `lsl` or put it somewhere else.
+- Run `seal .seal/build.luau`. Set `DIRECTORY_LISTER_LSL_BIN_LOCATION` to install somewhere other than `~/.local/bin/lsl`.

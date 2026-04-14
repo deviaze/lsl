@@ -34,16 +34,8 @@ local function get_size_of_directory(dir: string): (number, string?)
     if #failed > 0 then
         return size, table.concat(failed, "\n")
     end
-    
+
     return size, nil
 end
 
-if channel then
-    local path = channel.data.path :: string
-    local size, size_err = get_size_of_directory(path)
-
-    channel:send({
-        size = size,
-        partial = size_err ~= nil,
-    })
-end
+return get_size_of_directory
